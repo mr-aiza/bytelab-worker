@@ -50,71 +50,16 @@ async function runWithFallback(env, aiMessages){
   throw lastError || new Error("همه مدل‌ها شکست خوردند.");
 }
 
-// رمز ساده برای دیدن لیست تیکت‌ها — این رو عوض کن به یه چیز فقط خودت بدونی!
-const ADMIN_KEY = "8657";
-
 export default {
   async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
-    }
-
-    const url = new URL(request.url);
-
-    // ===== ثبت تیکت جدید =====
-    if (url.pathname === "/ticket" && request.method === "POST") {
-      try {
-        const { name, contact, subject, message } = await request.json();
-        if (!message || !message.trim()) {
-          return new Response(JSON.stringify({ error: "پیام خالی است." }), {
-            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-        const id = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-        const ticket = {
-          id,
-          name: name || "ناشناس",
-          contact: contact || "",
-          subject: subject || "بدون موضوع",
-          message,
-          createdAt: new Date().toISOString(),
-          status: "open",
-        };
-        await env.TICKETS_KV.put("ticket:" + id, JSON.stringify(ticket));
-        return new Response(JSON.stringify({ ok: true, id }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: "خطا: " + (err && err.message ? err.message : String(err)) }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // ===== دیدن لیست تیکت‌ها (فقط با رمز مدیریتی) =====
-    if (url.pathname === "/tickets" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (key !== ADMIN_KEY) {
-        return new Response("دسترسی غیرمجاز — رمز اشتباه است.", {
-          status: 401, headers: corsHeaders,
-        });
-      }
-      const list = await env.TICKETS_KV.list({ prefix: "ticket:" });
-      const tickets = [];
-      for (const k of list.keys) {
-        const val = await env.TICKETS_KV.get(k.name);
-        if (val) tickets.push(JSON.parse(val));
-      }
-      tickets.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      return new Response(JSON.stringify(tickets, null, 2), {
-        headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" },
-      });
     }
 
     // حالت دیباگ: وقتی مستقیم توی مرورگر (GET) باز بشه، یه تست ساده به AI می‌زنیم
