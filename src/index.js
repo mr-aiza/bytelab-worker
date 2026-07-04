@@ -1,11 +1,12 @@
 // آدرس واقعی صفحه اصلی سایتت — اگه دامنه یا مسیرش عوض شد، همینجا آپدیتش کن
 const SITE_URL = "https://mr-aiza.github.io/bytelab/index.html";
 
-// لیست مدل‌ها به ترتیب اولویت. اگه اولی خطا داد یا در دسترس نبود، میره سراغ بعدی.
+// لیست مدل‌ها به ترتیب اولویت. اول مدل سبک‌تر (نرون کمتر) امتحان می‌شه؛
+// اگه خطا داد یا جواب خالی برگردوند، میره سراغ مدل سنگین‌تر به‌عنوان fallback.
 const MODELS = [
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "@cf/meta/llama-3.1-8b-instruct",
   "@cf/meta/llama-3.1-8b-instruct-fast",
+  "@cf/meta/llama-3.1-8b-instruct",
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ];
 
 function stripHtml(html){
@@ -24,7 +25,7 @@ async function getSiteContext(){
     const res = await fetch(SITE_URL, { cf: { cacheTtl: 300, cacheEverything: true } });
     const html = await res.text();
     const text = stripHtml(html);
-    return text.slice(0, 8000); // جلوگیری از پرامپت بیش‌ازحد بزرگ
+    return text.slice(0, 3000); // کاهش طول برای مصرف کمتر نرون
   }catch(e){
     return "";
   }
@@ -59,6 +60,28 @@ export default {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    // حالت دیباگ: وقتی مستقیم توی مرورگر (GET) باز بشه، یه تست ساده به AI می‌زنیم
+    // و خطای واقعی رو به‌صورت متنی نشون می‌دیم تا بدون DevTools هم بشه دیباگ کرد.
+    if (request.method === "GET") {
+      try {
+        const testMessages = [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: "بگو 'سلام، من فعالم'" },
+        ];
+        const { response, modelUsed } = await runWithFallback(env, testMessages);
+        return new Response(
+          "✅ همه‌چیز سالمه!\nمدل استفاده‌شده: " + modelUsed + "\nجواب: " + response,
+          { headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" } }
+        );
+      } catch (err) {
+        return new Response(
+          "❌ خطا در تماس با AI:\n" + (err && err.message ? err.message : String(err)) +
+          "\n\nStack:\n" + (err && err.stack ? err.stack : "ندارد"),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" } }
+        );
+      }
     }
 
     if (request.method !== "POST") {
