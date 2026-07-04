@@ -1,5 +1,5 @@
 // آدرس واقعی صفحه اصلی سایتت — اگه دامنه یا مسیرش عوض شد، همینجا آپدیتش کن
-const SITE_URL = "https://mr-aiza.github.io/bytelab/index.html";
+const SITE_URL = "https://mr-aiza.github.io/bytelab/chat.html";
 
 function stripHtml(html){
   return html
