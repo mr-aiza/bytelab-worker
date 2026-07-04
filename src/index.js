@@ -1,6 +1,13 @@
 // آدرس واقعی صفحه اصلی سایتت — اگه دامنه یا مسیرش عوض شد، همینجا آپدیتش کن
 const SITE_URL = "https://mr-aiza.github.io/bytelab/index.html";
 
+// لیست مدل‌ها به ترتیب اولویت. اگه اولی خطا داد یا در دسترس نبود، میره سراغ بعدی.
+const MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-3.1-8b-instruct",
+  "@cf/meta/llama-3.1-8b-instruct-fast",
+];
+
 function stripHtml(html){
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -21,6 +28,25 @@ async function getSiteContext(){
   }catch(e){
     return "";
   }
+}
+
+// امتحان کردن مدل‌ها یکی‌یکی تا یکی جواب بده
+async function runWithFallback(env, aiMessages){
+  let lastError = null;
+  for (const model of MODELS) {
+    try {
+      const result = await env.AI.run(model, { messages: aiMessages });
+      if (result && result.response) {
+        return { response: result.response, modelUsed: model };
+      }
+      lastError = new Error(`مدل ${model} پاسخ خالی برگرداند.`);
+    } catch (err) {
+      lastError = err;
+      // برو سراغ مدل بعدی
+      continue;
+    }
+  }
+  throw lastError || new Error("همه مدل‌ها شکست خوردند.");
 }
 
 export default {
@@ -56,14 +82,13 @@ ${siteContext}
         ...messages.map(m => ({ role: m.role, content: m.content })),
       ];
 
-      // مدل رایگان روی زیرساخت خود Cloudflare (بدون کلید، بدون هزینه)
-      const result = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-        messages: aiMessages,
-      });
+      // امتحان کردن مدل‌ها با fallback خودکار
+      const { response, modelUsed } = await runWithFallback(env, aiMessages);
 
       // خروجی را در همان قالبی که chat.html انتظار دارد برمی‌گردانیم
       const wrapped = {
-        content: [{ type: "text", text: result.response || "پاسخی دریافت نشد." }],
+        content: [{ type: "text", text: response || "پاسخی دریافت نشد." }],
+        _debug_model: modelUsed, // برای دیباگ؛ اگه نخواستی می‌تونی حذفش کنی
       };
 
       return new Response(JSON.stringify(wrapped), {
