@@ -17,24 +17,23 @@ export default {
     try {
       const { system, messages } = await request.json();
 
-      const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": env.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          system: system,
-          messages: messages,
-        }),
+      // تبدیل پیام‌ها به فرمتی که Workers AI می‌فهمد
+      const aiMessages = [
+        { role: "system", content: system },
+        ...messages.map(m => ({ role: m.role, content: m.content })),
+      ];
+
+      // مدل رایگان روی زیرساخت خود Cloudflare (بدون کلید، بدون هزینه)
+      const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+        messages: aiMessages,
       });
 
-      const data = await anthropicRes.json();
+      // خروجی را در همان قالبی که chat.html انتظار دارد برمی‌گردانیم
+      const wrapped = {
+        content: [{ type: "text", text: result.response || "پاسخی دریافت نشد." }],
+      };
 
-      return new Response(JSON.stringify(data), {
+      return new Response(JSON.stringify(wrapped), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     } catch (err) {
