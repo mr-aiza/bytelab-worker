@@ -24,7 +24,7 @@ export default {
       ];
 
       // مدل رایگان روی زیرساخت خود Cloudflare (بدون کلید، بدون هزینه)
-      const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+      const result = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: aiMessages,
       });
 
