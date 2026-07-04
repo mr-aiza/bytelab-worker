@@ -1,5 +1,6 @@
 # wrangler.toml
-name = 'bytelab'
+# wrangler.toml
+name = 'bytelab-worker'
 main = "src/index.js"
 compatibility_date = "2026-07-04"
 
