@@ -112,6 +112,28 @@ function base64ToBytes(base64Input) {
   return Array.from(bytes);
 }
 
+// جلوگیری از حلقه‌ی تکرار: اگه یک جمله چندبار پشت‌سرهم تکرار بشه،
+// خروجی رو از همون نقطه قطع می‌کنیم.
+function cutRepetition(text) {
+  if (!text) return text;
+  // متن رو به جمله تقسیم می‌کنیم (بر اساس نقطه/علامت سوال/تعجب فارسی و انگلیسی)
+  const sentences = text.split(/(?<=[.!؟?])\s+/).filter(Boolean);
+  const seen = new Map();
+  const result = [];
+  for (const s of sentences) {
+    const key = s.trim();
+    if (!key) continue;
+    const count = (seen.get(key) || 0) + 1;
+    seen.set(key, count);
+    if (count > 2) {
+      // همین که یک جمله برای سومین‌بار تکرار شد، همون‌جا متوقف می‌شیم
+      break;
+    }
+    result.push(s);
+  }
+  return result.join(" ").trim() || text.slice(0, 400).trim();
+}
+
 async function runVision(env, imageBase64, promptText) {
   const imageBytes = base64ToBytes(imageBase64);
 
@@ -119,12 +141,13 @@ async function runVision(env, imageBase64, promptText) {
     const result = await env.AI.run(VISION_MODEL, {
       image: imageBytes,
       prompt: promptText,
-      max_tokens: 700,
+      max_tokens: 400,
+      temperature: 0.3,
     });
     if (!result || !result.response) {
       throw new Error("مدل تصویر پاسخ خالی برگرداند.");
     }
-    return result.response;
+    return cutRepetition(result.response);
   }
 
   try {
@@ -202,9 +225,23 @@ ${siteContext}
             ? messages[messages.length - 1].content
             : "") || "این تصویر رو بررسی کن.";
 
-        const visionPrompt = `تو دستیار هوش مصنوعی بایت‌لب (BYTELAB) هستی، به فارسی روان و کوتاه جواب بده.
-اگر عکس یک خطا/پیغام سیستم/موبایل/کامپیوتر یا صفحه سایت/اپه، مشکل رو تشخیص بده و راه‌حل مرحله‌به‌مرحله بده.
-اگر عکس یک طرح، رفرنس طراحی، یا نمونه‌کاره، درباره سبک و امکانات مشابهی که بایت‌لب می‌تونه پیاده کنه نظر بده.
+        const visionPrompt = `تو دستیار هوش مصنوعی بایت‌لب (BYTELAB) هستی. فقط و فقط بر اساس چیزی که واقعاً توی عکس می‌بینی جواب بده، حدس اضافه نزن و هیچ جمله‌ای رو تکرار نکن.
+
+اول با خودت مشخص کن عکس از کدوم دسته‌ست، بعد فقط طبق همون دسته جواب بده:
+
+الف) اگر عکس یک خطا/پیغام سیستم/باگ نرم‌افزار/کد/صفحه اپ یا سایته:
+   ۱) توصیف کوتاه از چیزی که توی عکس می‌بینی (چه خطا یا چه وضعیتی)
+   ۲) علت احتمالی و راه‌حل مرحله‌به‌مرحله
+
+ب) اگر عکس یک طرح گرافیکی/رفرنس UI/UX/نمونه‌کار طراحیه:
+   ۱) توصیف کوتاه از سبک بصری عکس
+   ۲) امکانات مشابهی که بایت‌لب می‌تونه پیاده کنه
+
+ج) اگر عکس هیچ‌کدوم از موارد بالا نیست (مثلاً منظره، خیابون، حیوان، غذا، آدم، یا هر چیز عادی دیگه‌ای که ربطی به کد/طراحی سایت/خطای نرم‌افزاری نداره):
+   فقط و فقط توصیف صادقانه و دقیق از چیزی که واقعاً توی عکس هست بده (چه چیزهایی، چه رنگ‌ها، چه فضایی). به بایت‌لب یا خدمات طراحی یا خطای فنی هیچ اشاره‌ای نکن، چون ربطی به اون نداره. الکی به زور موضوع رو به کد یا طراحی وصل نکن.
+
+فقط یکی از سه حالت بالا رو انتخاب کن و جواب رو حداکثر در ۳-۴ جمله کوتاه بده.
+
 درخواست/پیام کاربر همراه عکس: "${lastUserText}"`;
 
         try {
