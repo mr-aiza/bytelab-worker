@@ -1,6 +1,7 @@
 // ===================================================================================
 // bytelab-ai Worker
 // نسخه جدید: پشتیبانی از تصویر (Vision)، خوندن چند صفحه سایت، و پاسخ بهتر
+// + رفع خودکار خطای 5016 (پذیرش توافق‌نامه Llama Vision)
 // ===================================================================================
 
 const BASE_URL = "https://bytelabpro.xyz";
@@ -26,8 +27,7 @@ const TEXT_MODELS = [
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ];
 
-// مدل تصویر (Vision) — قبل از اولین استفاده باید یک‌بار توافق‌نامه Meta پذیرفته بشه
-// (توضیح در پیام همراه کد)
+// مدل تصویر (Vision)
 const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 
 const DEFAULT_MAX_TOKENS = 900;
@@ -114,15 +114,42 @@ function base64ToBytes(base64Input) {
 
 async function runVision(env, imageBase64, promptText) {
   const imageBytes = base64ToBytes(imageBase64);
-  const result = await env.AI.run(VISION_MODEL, {
-    image: imageBytes,
-    prompt: promptText,
-    max_tokens: 700,
-  });
-  if (!result || !result.response) {
-    throw new Error("مدل تصویر پاسخ خالی برگرداند.");
+
+  async function callModel() {
+    const result = await env.AI.run(VISION_MODEL, {
+      image: imageBytes,
+      prompt: promptText,
+      max_tokens: 700,
+    });
+    if (!result || !result.response) {
+      throw new Error("مدل تصویر پاسخ خالی برگرداند.");
+    }
+    return result.response;
   }
-  return result.response;
+
+  try {
+    return await callModel();
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    // خطای 5016 یعنی هنوز توافق‌نامه Meta برای این اکانت پذیرفته نشده.
+    // یک‌بار خودکار درخواست "agree" رو می‌فرستیم و دوباره تلاش می‌کنیم.
+    const needsAgreement =
+      msg.includes("5016") ||
+      msg.toLowerCase().includes("agree") ||
+      msg.toLowerCase().includes("license");
+
+    if (!needsAgreement) throw err;
+
+    try {
+      await env.AI.run(VISION_MODEL, { prompt: "agree" });
+    } catch (agreeErr) {
+      // اگه خود درخواست agree هم خطا داد، همون خطای اصلی رو پرتاب کن
+      throw err;
+    }
+
+    // تلاش دوم بعد از پذیرش توافق‌نامه
+    return await callModel();
+  }
 }
 
 export default {
@@ -194,8 +221,7 @@ ${siteContext}
             JSON.stringify({
               error:
                 "خطا در تحلیل تصویر: " +
-                (visionErr && visionErr.message ? visionErr.message : String(visionErr)) +
-                " — اگه اولین باره از این مدل استفاده می‌کنی، باید یک‌بار توافق‌نامه مدل Llama Vision رو در داشبورد Cloudflare AI بپذیری.",
+                (visionErr && visionErr.message ? visionErr.message : String(visionErr)),
             }),
             { status: 500, headers: { ...cors, "Content-Type": "application/json" } }
           );
