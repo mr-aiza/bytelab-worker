@@ -1,4 +1,3 @@
-
 // ===================================================================================
 // bytelab-ai Worker
 // نسخه جدید: پشتیبانی از تصویر (Vision)، خوندن چند صفحه سایت، و پاسخ بهتر
@@ -148,7 +147,22 @@ function cutRepetition(text) {
     result.push(s);
   }
   const finalText = result.join(" ").trim();
-  return finalText || text.slice(0, 300).trim();
+  const cleaned = finalText || text.slice(0, 300).trim();
+
+  // اگه جمله‌ی آخر ناقص مونده (به نقطه/علامت پایانی ختم نشده)، حذفش کن
+  // تا کاربر جمله‌ی نصفه نبینه.
+  if (cleaned && !/[.!؟?]$/.test(cleaned)) {
+    const lastEnd = Math.max(
+      cleaned.lastIndexOf("."),
+      cleaned.lastIndexOf("!"),
+      cleaned.lastIndexOf("؟"),
+      cleaned.lastIndexOf("?")
+    );
+    if (lastEnd > 20) {
+      return cleaned.slice(0, lastEnd + 1).trim();
+    }
+  }
+  return cleaned;
 }
 
 async function runVision(env, imageBase64, promptText) {
@@ -158,7 +172,7 @@ async function runVision(env, imageBase64, promptText) {
     const result = await env.AI.run(VISION_MODEL, {
       image: imageBytes,
       prompt: promptText,
-      max_tokens: 220,
+      max_tokens: 450,
       temperature: 0.2,
     });
     if (!result || !result.response) {
