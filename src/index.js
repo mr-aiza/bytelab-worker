@@ -1,12 +1,11 @@
 // ===================================================================================
-// bytelab-ai Worker
-// نسخه جدید: پشتیبانی از تصویر (Vision)، خوندن چند صفحه سایت، و پاسخ بهتر
-// + رفع خودکار خطای 5016 (پذیرش توافق‌نامه Llama Vision)
+// bytelab-ai Worker — نسخه کامل
+// شامل: تصویر (چندتایی)، صدا، کش سایت (Cache API)، رفع تکرار، انتخاب هوشمند مدل،
+// فیلتر پایه ورودی، fallback دوستانه، دکمه‌های پیشنهادی
 // ===================================================================================
 
 const BASE_URL = "https://bytelabpro.xyz";
 
-// صفحاتی که هوش مصنوعی برای شناخت کامل سایت می‌خونه (به ترتیب اهمیت)
 const SITE_PAGES = [
   "/index.html",
   "/tarahi-site.html",
@@ -17,21 +16,22 @@ const SITE_PAGES = [
   "/blog.html",
 ];
 
-// هر صفحه حداکثر چقدر کاراکتر توی کانتکست بیاد (جمعاً حدود ۶۰۰۰ کاراکتر)
 const PER_PAGE_CHAR_LIMIT = 850;
+const SITE_CONTEXT_CACHE_SECONDS = 600; // ۱۰ دقیقه کش
 
-// مدل‌های متنی به ترتیب اولویت (سبک‌تر اول، سنگین‌تر fallback)
-const TEXT_MODELS = [
-  "@cf/meta/llama-3.1-8b-instruct-fast",
-  "@cf/meta/llama-3.1-8b-instruct",
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-];
+// مدل سبک (سریع) و مدل سنگین (باهوش‌تر ولی کندتر)
+const LIGHT_MODELS = ["@cf/meta/llama-3.1-8b-instruct-fast", "@cf/meta/llama-3.1-8b-instruct"];
+const HEAVY_MODELS = ["@cf/meta/llama-3.3-70b-instruct-fp8-fast"];
 
-// مدل تصویر (Vision)
 const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+const WHISPER_MODEL = "@cf/openai/whisper";
 
 const DEFAULT_MAX_TOKENS = 900;
 const HARD_MAX_TOKENS = 1400;
+
+const MAX_USER_MESSAGE_LENGTH = 2000; // کاراکتر
+const MAX_IMAGE_BASE64_LENGTH = 7_000_000; // تقریباً ۵ مگابایت فایل واقعی
+const MAX_IMAGES_PER_REQUEST = 4;
 
 function corsHeaders() {
   return {
@@ -39,6 +39,13 @@ function corsHeaders() {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
+}
+
+function jsonResponse(obj, status, cors) {
+  return new Response(JSON.stringify(obj), {
+    status: status || 200,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
 }
 
 function stripHtml(html) {
@@ -53,8 +60,22 @@ function stripHtml(html) {
     .trim();
 }
 
-// خوندن همزمان چند صفحه از سایت و ترکیب‌شون به یک کانتکست زنده
-async function getSiteContext() {
+// ------------------------------------------------------------------
+// کش کردن اطلاعات سایت با Cache API (بدون نیاز به هیچ تنظیم اضافه)
+// ------------------------------------------------------------------
+async function getSiteContext(ctx) {
+  const cacheKey = new Request(BASE_URL + "/__ai_site_context_cache__");
+  const cache = caches.default;
+
+  try {
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      return await cached.text();
+    }
+  } catch (e) {
+    // اگه کش در دسترس نبود، بی‌خیال می‌شیم و مستقیم می‌خونیم
+  }
+
   const fetches = SITE_PAGES.map(async (path) => {
     try {
       const controller = new AbortController();
@@ -74,16 +95,58 @@ async function getSiteContext() {
   });
 
   const results = await Promise.all(fetches);
-  return results.filter(Boolean).join("\n\n");
+  const combined = results.filter(Boolean).join("\n\n");
+
+  try {
+    const response = new Response(combined, {
+      headers: { "Cache-Control": `max-age=${SITE_CONTEXT_CACHE_SECONDS}` },
+    });
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(cache.put(cacheKey, response));
+    } else {
+      await cache.put(cacheKey, response);
+    }
+  } catch (e) {
+    // کش نشد، مشکلی نیست
+  }
+
+  return combined;
 }
 
-async function runTextWithFallback(env, aiMessages, maxTokens) {
+// ------------------------------------------------------------------
+// انتخاب هوشمند مدل: سوالای ساده → مدل سبک، سوالای پیچیده → مدل سنگین
+// ------------------------------------------------------------------
+function needsHeavyModel(userText) {
+  if (!userText) return false;
+  const heavySignals = [
+    "چرا",
+    "مقایسه",
+    "تحلیل",
+    "برنامه‌ریزی",
+    "برنامه ریزی",
+    "استراتژی",
+    "پیچیده",
+    "کد بنویس",
+    "دیباگ",
+    "طراحی کن",
+    "معماری",
+  ];
+  const isLong = userText.length > 350;
+  const hasSignal = heavySignals.some((w) => userText.includes(w));
+  return isLong || hasSignal;
+}
+
+async function runTextWithFallback(env, aiMessages, maxTokens, preferHeavy) {
+  const modelOrder = preferHeavy
+    ? [...HEAVY_MODELS, ...LIGHT_MODELS]
+    : [...LIGHT_MODELS, ...HEAVY_MODELS];
+
   let lastError = null;
   const safeMaxTokens = Math.min(
     Math.max(parseInt(maxTokens, 10) || DEFAULT_MAX_TOKENS, 256),
     HARD_MAX_TOKENS
   );
-  for (const model of TEXT_MODELS) {
+  for (const model of modelOrder) {
     try {
       const result = await env.AI.run(model, {
         messages: aiMessages,
@@ -101,7 +164,7 @@ async function runTextWithFallback(env, aiMessages, maxTokens) {
   throw lastError || new Error("همه مدل‌ها شکست خوردند.");
 }
 
-// تبدیل data URL یا base64 خام به آرایه بایت که Workers AI انتظار داره
+// تبدیل data URL یا base64 خام به آرایه بایت
 function base64ToBytes(base64Input) {
   const clean = base64Input.includes(",") ? base64Input.split(",")[1] : base64Input;
   const binary = atob(clean);
@@ -112,12 +175,12 @@ function base64ToBytes(base64Input) {
   return Array.from(bytes);
 }
 
-// تشخیص و قطع حلقه‌های تکراری در دو سطح:
-// ۱) تکرار جمله‌های کامل   ۲) تکرار یک عبارت/کلمه چندبار پشت‌سرهم وسط متن (بدون نقطه)
+// ------------------------------------------------------------------
+// رفع حلقه‌ی تکرار (دو سطح: n-gram و جمله‌ی کامل) + پاک‌سازی جمله‌ی ناقص آخر
+// ------------------------------------------------------------------
 function cutRepetition(text) {
   if (!text) return text;
 
-  // --- سطح ۱: تکرار عبارت/کلمه (n-gram) پشت‌سرهم ---
   const words = text.split(/\s+/);
   for (let winSize = 1; winSize <= 8; winSize++) {
     for (let i = 0; i + winSize * 3 <= words.length; i++) {
@@ -125,7 +188,6 @@ function cutRepetition(text) {
       const b = words.slice(i + winSize, i + 2 * winSize).join(" ");
       const c = words.slice(i + 2 * winSize, i + 3 * winSize).join(" ");
       if (a && a === b && a === c) {
-        // همین که یک عبارت سه‌بار پشت‌سرهم تکرار شد، درست قبل از شروع حلقه قطع می‌کنیم
         const cutWords = words.slice(0, i + winSize);
         text = cutWords.join(" ").trim();
         if (!/[.!؟?]$/.test(text)) text += ".";
@@ -134,7 +196,6 @@ function cutRepetition(text) {
     }
   }
 
-  // --- سطح ۲: تکرار جمله‌های کامل ---
   const sentences = text.split(/(?<=[.!؟?])\s+/).filter(Boolean);
   const seen = new Map();
   const result = [];
@@ -149,8 +210,6 @@ function cutRepetition(text) {
   const finalText = result.join(" ").trim();
   const cleaned = finalText || text.slice(0, 300).trim();
 
-  // اگه جمله‌ی آخر ناقص مونده (به نقطه/علامت پایانی ختم نشده)، حذفش کن
-  // تا کاربر جمله‌ی نصفه نبینه.
   if (cleaned && !/[.!؟?]$/.test(cleaned)) {
     const lastEnd = Math.max(
       cleaned.lastIndexOf("."),
@@ -165,6 +224,9 @@ function cutRepetition(text) {
   return cleaned;
 }
 
+// ------------------------------------------------------------------
+// تحلیل تصویر (با پذیرش خودکار توافق‌نامه در صورت نیاز)
+// ------------------------------------------------------------------
 async function runVision(env, imageBase64, promptText) {
   const imageBytes = base64ToBytes(imageBase64);
 
@@ -185,8 +247,6 @@ async function runVision(env, imageBase64, promptText) {
     return await callModel();
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
-    // خطای 5016 یعنی هنوز توافق‌نامه Meta برای این اکانت پذیرفته نشده.
-    // یک‌بار خودکار درخواست "agree" رو می‌فرستیم و دوباره تلاش می‌کنیم.
     const needsAgreement =
       msg.includes("5016") ||
       msg.toLowerCase().includes("agree") ||
@@ -197,24 +257,76 @@ async function runVision(env, imageBase64, promptText) {
     try {
       await env.AI.run(VISION_MODEL, { prompt: "agree" });
     } catch (agreeErr) {
-      // اگه خود درخواست agree هم خطا داد، همون خطای اصلی رو پرتاب کن
       throw err;
     }
-
-    // تلاش دوم بعد از پذیرش توافق‌نامه
     return await callModel();
   }
 }
 
+function buildVisionPrompt(lastUserText, conversationHint) {
+  return `فقط بر اساس چیزی که واقعاً توی عکس می‌بینی، به فارسی و در حداکثر ۳ جمله کوتاه جواب بده. هیچ کلمه یا جمله‌ای رو تکرار نکن. هیچ برچسب، شماره، یا حرف (مثل الف، ب، ج، ۱، ۲) توی جوابت ننویس؛ فقط متن ساده و روان بنویس.
+
+راهنمای داخلی (توی جواب نیار، فقط طبق این تصمیم بگیر):
+- اگر عکس نشون‌دهنده خطا، پیغام سیستم، یا مشکل نرم‌افزاری/کده: بگو مشکل چیه و راه‌حلش رو بگو.
+- اگر عکس یک طرح گرافیکی، رابط کاربری (UI/UX)، یا نمونه‌کار طراحیه: سبک بصری رو توصیف کن و بگو بایت‌لب چه امکانات مشابهی می‌تونه پیاده کنه.
+- در غیر این صورت (منظره، خیابون، حیوان، آدم، غذا، یا هر چیز عادی دیگه): فقط صادقانه توصیف کن چی توی عکس هست، بدون هیچ اشاره‌ای به بایت‌لب یا خطای فنی.
+${conversationHint ? `\nزمینه‌ی مکالمه‌ی قبلی (برای درک بهتر ادامه‌ی صحبت): ${conversationHint}\n` : ""}
+درخواست/پیام کاربر همراه عکس: "${lastUserText}"`;
+}
+
+// ------------------------------------------------------------------
+// تبدیل صدا به متن (Whisper)
+// ------------------------------------------------------------------
+async function transcribeAudio(env, audioBase64) {
+  const audioBytes = base64ToBytes(audioBase64);
+  const result = await env.AI.run(WHISPER_MODEL, { audio: audioBytes });
+  if (!result || !result.text) {
+    throw new Error("تبدیل صدا به متن ناموفق بود.");
+  }
+  return result.text.trim();
+}
+
+// ------------------------------------------------------------------
+// فیلتر پایه‌ی ورودی: طول بیش‌ازحد یا اسپم آشکار
+// ------------------------------------------------------------------
+function moderateInput(text) {
+  if (!text) return { ok: true };
+  if (text.length > MAX_USER_MESSAGE_LENGTH) {
+    return { ok: false, reason: "پیام شما خیلی طولانیه. لطفاً کوتاه‌ترش کن." };
+  }
+  // تکرار مشکوک یک کاراکتر/کلمه بیش از ۳۰ بار پشت‌سرهم → احتمال اسپم یا حمله
+  if (/(.)\1{30,}/.test(text)) {
+    return { ok: false, reason: "پیام شما معتبر به نظر نمی‌رسه، لطفاً واضح بنویس." };
+  }
+  return { ok: true };
+}
+
+// ------------------------------------------------------------------
+// پیشنهاد دکمه‌های بعدی بر اساس نوع پاسخ (heuristic ساده)
+// ------------------------------------------------------------------
+function buildSuggestedActions(responseText, isVision) {
+  if (isVision) {
+    return ["یه اسکرین‌شات دیگه بفرستم؟", "راه‌حل جایگزین هم هست؟", "هزینه‌ی رفعش چقدره؟"];
+  }
+  const t = responseText || "";
+  if (/قیمت|هزینه|تومان/.test(t)) {
+    return ["جزئیات بیشتر قیمت", "می‌خوام سفارش بدم", "با پشتیبانی صحبت کنم"];
+  }
+  if (/خطا|مشکل|باگ/.test(t)) {
+    return ["اسکرین‌شات بفرستم؟", "راه‌حل دیگه‌ای هست؟"];
+  }
+  return ["بیشتر توضیح بده", "نمونه‌کار ببینم", "با بایت‌لب تماس بگیرم"];
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const cors = corsHeaders();
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: cors });
     }
 
-    // حالت دیباگ: تست سریع از مرورگر
+    // ---- تست سلامت سرویس ----
     if (request.method === "GET") {
       try {
         const testMessages = [
@@ -240,48 +352,105 @@ export default {
 
     try {
       const body = await request.json();
-      const { system, messages, image, max_tokens } = body;
+      const { system, messages, image, images, audio, max_tokens } = body;
 
-      const siteContext = await getSiteContext();
+      // ---- اگه صدا فرستاده شده، اول تبدیلش کن به متن ----
+      let effectiveMessages = messages || [];
+      if (audio) {
+        try {
+          const transcribed = await transcribeAudio(env, audio);
+          effectiveMessages = [...effectiveMessages, { role: "user", content: transcribed }];
+        } catch (audioErr) {
+          return jsonResponse(
+            { error: "خطا در تبدیل صدا به متن: " + (audioErr.message || String(audioErr)) },
+            500,
+            cors
+          );
+        }
+      }
+
+      const lastUserText =
+        effectiveMessages && effectiveMessages.length
+          ? effectiveMessages[effectiveMessages.length - 1].content
+          : "";
+
+      // ---- فیلتر پایه‌ی ورودی ----
+      const modCheck = moderateInput(lastUserText);
+      if (!modCheck.ok) {
+        return jsonResponse({ error: modCheck.reason }, 400, cors);
+      }
+
+      const siteContext = await getSiteContext(ctx);
+
       const fullSystem = `${system || ""}
 
 ===== اطلاعات زنده سایت بایت‌لب (چند صفحه، تازه‌خوانی‌شده) =====
 ${siteContext}
-===== پایان اطلاعات سایت =====`;
+===== پایان اطلاعات سایت =====
+اگه مناسب بود، از فرمت لیستی/مارک‌داون ساده برای خوانایی بهتر استفاده کن.`;
 
-      // ---- حالت تصویر: کاربر عکس فرستاده ----
-      if (image) {
-        const lastUserText =
-          (messages && messages.length
-            ? messages[messages.length - 1].content
-            : "") || "این تصویر رو بررسی کن.";
+      // ---- حالت تصویر: تک عکس یا چند عکس ----
+      const imageList = images && Array.isArray(images) ? images : image ? [image] : [];
 
-        const visionPrompt = `فقط بر اساس چیزی که واقعاً توی عکس می‌بینی، به فارسی و در حداکثر ۳ جمله کوتاه جواب بده. هیچ کلمه یا جمله‌ای رو تکرار نکن. هیچ برچسب، شماره، یا حرف (مثل الف، ب، ج، ۱، ۲) توی جوابت ننویس؛ فقط متن ساده و روان بنویس.
+      if (imageList.length > 0) {
+        if (imageList.length > MAX_IMAGES_PER_REQUEST) {
+          return jsonResponse(
+            { error: `حداکثر ${MAX_IMAGES_PER_REQUEST} عکس در هر درخواست مجازه.` },
+            400,
+            cors
+          );
+        }
+        for (const img of imageList) {
+          if (typeof img === "string" && img.length > MAX_IMAGE_BASE64_LENGTH) {
+            return jsonResponse(
+              { error: "حجم عکس خیلی زیاده. لطفاً عکس کوچک‌تری بفرست." },
+              400,
+              cors
+            );
+          }
+        }
 
-راهنمای داخلی (توی جواب نیار، فقط طبق این تصمیم بگیر):
-- اگر عکس نشون‌دهنده خطا، پیغام سیستم، یا مشکل نرم‌افزاری/کده: بگو مشکل چیه و راه‌حلش رو بگو.
-- اگر عکس یک طرح گرافیکی، رابط کاربری (UI/UX)، یا نمونه‌کار طراحیه: سبک بصری رو توصیف کن و بگو بایت‌لب چه امکانات مشابهی می‌تونه پیاده کنه.
-- در غیر این صورت (منظره، خیابون، حیوان، آدم، غذا، یا هر چیز عادی دیگه): فقط صادقانه توصیف کن چی توی عکس هست، بدون هیچ اشاره‌ای به بایت‌لب یا خطای فنی.
+        const conversationHint =
+          effectiveMessages.length > 1
+            ? effectiveMessages
+                .slice(-4, -1)
+                .map((m) => `${m.role === "user" ? "کاربر" : "دستیار"}: ${String(m.content).slice(0, 150)}`)
+                .join(" | ")
+            : "";
 
-درخواست/پیام کاربر همراه عکس: "${lastUserText}"`;
+        const visionPrompt = buildVisionPrompt(
+          lastUserText || "این تصویر رو بررسی کن.",
+          conversationHint
+        );
 
         try {
-          const visionResponse = await runVision(env, image, visionPrompt);
-          return new Response(
-            JSON.stringify({
-              content: [{ type: "text", text: visionResponse }],
+          const visionResponses = [];
+          for (const img of imageList) {
+            const r = await runVision(env, img, visionPrompt);
+            visionResponses.push(r);
+          }
+          const combinedText =
+            imageList.length === 1
+              ? visionResponses[0]
+              : visionResponses.map((r, i) => `تصویر ${i + 1}: ${r}`).join("\n\n");
+
+          return jsonResponse(
+            {
+              content: [{ type: "text", text: combinedText }],
+              suggested_actions: buildSuggestedActions(combinedText, true),
               _debug_model: VISION_MODEL,
-            }),
-            { headers: { ...cors, "Content-Type": "application/json" } }
+            },
+            200,
+            cors
           );
         } catch (visionErr) {
-          return new Response(
-            JSON.stringify({
+          return jsonResponse(
+            {
               error:
-                "خطا در تحلیل تصویر: " +
-                (visionErr && visionErr.message ? visionErr.message : String(visionErr)),
-            }),
-            { status: 500, headers: { ...cors, "Content-Type": "application/json" } }
+                "متأسفانه الان امکان تحلیل تصویر نیست. یه لحظه دیگه دوباره امتحان کن، یا سوالت رو به‌صورت متنی بپرس.",
+            },
+            500,
+            cors
           );
         }
       }
@@ -289,22 +458,43 @@ ${siteContext}
       // ---- حالت معمولی: متن ----
       const aiMessages = [
         { role: "system", content: fullSystem },
-        ...(messages || []).map((m) => ({ role: m.role, content: m.content })),
+        ...effectiveMessages.map((m) => ({ role: m.role, content: m.content })),
       ];
 
-      const { response, modelUsed } = await runTextWithFallback(env, aiMessages, max_tokens);
+      const preferHeavy = needsHeavyModel(lastUserText);
 
-      return new Response(
-        JSON.stringify({
-          content: [{ type: "text", text: response || "پاسخی دریافت نشد." }],
-          _debug_model: modelUsed,
-        }),
-        { headers: { ...cors, "Content-Type": "application/json" } }
-      );
+      try {
+        const { response, modelUsed } = await runTextWithFallback(
+          env,
+          aiMessages,
+          max_tokens,
+          preferHeavy
+        );
+
+        return jsonResponse(
+          {
+            content: [{ type: "text", text: response || "پاسخی دریافت نشد." }],
+            suggested_actions: buildSuggestedActions(response, false),
+            _debug_model: modelUsed,
+          },
+          200,
+          cors
+        );
+      } catch (allModelsErr) {
+        return jsonResponse(
+          {
+            error:
+              "الان سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً چند دقیقه دیگه دوباره امتحان کن.",
+          },
+          503,
+          cors
+        );
+      }
     } catch (err) {
-      return new Response(
-        JSON.stringify({ error: "خطا: " + (err && err.message ? err.message : String(err)) }),
-        { status: 500, headers: { ...cors, "Content-Type": "application/json" } }
+      return jsonResponse(
+        { error: "خطا: " + (err && err.message ? err.message : String(err)) },
+        500,
+        cors
       );
     }
   },
