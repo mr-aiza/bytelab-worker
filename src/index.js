@@ -263,9 +263,9 @@ async function runVision(env, imageBase64, promptText) {
   }
 }
 
-function buildVisionPrompt(lastUserText, conversationHint) {
-  return `فقط بر اساس چیزی که واقعاً توی عکس می‌بینی، به فارسی و در حداکثر ۳ جمله کوتاه جواب بده. هیچ کلمه یا جمله‌ای رو تکرار نکن. هیچ برچسب، شماره، یا حرف (مثل الف، ب، ج، ۱، ۲) توی جوابت ننویس؛ فقط متن ساده و روان بنویس.
-
+function buildVisionPrompt(lastUserText, conversationHint, languageInstruction) {
+  return `فقط بر اساس چیزی که واقعاً توی عکس می‌بینی، در حداکثر ۳ جمله کوتاه جواب بده. هیچ کلمه یا جمله‌ای رو تکرار نکن. هیچ برچسب، شماره، یا حرف (مثل الف، ب، ج، ۱، ۲) توی جوابت ننویس؛ فقط متن ساده و روان بنویس.
+${languageInstruction ? `\n${languageInstruction}\n` : ""}
 راهنمای داخلی (توی جواب نیار، فقط طبق این تصمیم بگیر):
 - اگر عکس نشون‌دهنده خطا، پیغام سیستم، یا مشکل نرم‌افزاری/کده: بگو مشکل چیه و راه‌حلش رو بگو.
 - اگر عکس یک طرح گرافیکی، رابط کاربری (UI/UX)، یا نمونه‌کار طراحیه: سبک بصری رو توصیف کن و بگو بایت‌لب چه امکانات مشابهی می‌تونه پیاده کنه.
@@ -302,8 +302,81 @@ function moderateInput(text) {
 }
 
 // ------------------------------------------------------------------
-// پیشنهاد دکمه‌های بعدی بر اساس نوع پاسخ (heuristic ساده)
+// چند مثال Few-shot برای ثابت نگه‌داشتن لحن بایت‌لب
 // ------------------------------------------------------------------
+const FEW_SHOT_EXAMPLES = [
+  { role: "user", content: "قیمت طراحی سایت شرکتی چقدره؟" },
+  {
+    role: "assistant",
+    content:
+      "قیمت بسته به تعداد صفحات و امکانات فرق می‌کنه. برای یه برآورد دقیق، می‌تونی بگی چند صفحه می‌خوای و چه امکاناتی (فرم تماس، فروشگاه، پنل مدیریت و غیره) مدنظرته تا دقیق‌تر راهنماییت کنم.",
+  },
+  { role: "user", content: "اپلیکیشن اندروید هم طراحی می‌کنید؟" },
+  {
+    role: "assistant",
+    content:
+      "بله، طراحی و توسعه اپ اندروید هم جزو خدمات بایت‌لبه. بسته به این‌که اپت قراره چیکار کنه (فروشگاهی، مدیریتی، شبکه اجتماعی...) رویکرد فرق می‌کنه. می‌تونی بیشتر درباره ایده‌ات بگی؟",
+  },
+];
+
+// ------------------------------------------------------------------
+// تشخیص زبان پیام کاربر (فارسی/عربی در برابر لاتین) و ساخت دستور صریح زبان
+// ------------------------------------------------------------------
+function detectLanguageInstruction(text) {
+  if (!text) return "";
+  const persianCount = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const latinCount = (text.match(/[A-Za-z]/g) || []).length;
+
+  if (latinCount > persianCount && latinCount >= 4) {
+    return "کاربر پیامش رو به انگلیسی نوشته. حتماً جواب رو کامل و روان به زبان انگلیسی بده، نه فارسی.";
+  }
+  return "کاربر به فارسی نوشته. جواب رو به فارسی روان بده.";
+}
+
+// ------------------------------------------------------------------
+// خلاصه‌سازی مکالمه‌های طولانی قبل از فرستادن به مدل (صرفه‌جویی توکن)
+// ------------------------------------------------------------------
+const CONVERSATION_SUMMARY_THRESHOLD = 10; // بیشتر از این تعداد پیام → خلاصه می‌شه
+const CONVERSATION_KEEP_RECENT = 6; // این تعداد پیام آخر همیشه کامل نگه داشته می‌شه
+
+async function condenseConversation(env, messages) {
+  if (!messages || messages.length <= CONVERSATION_SUMMARY_THRESHOLD) {
+    return messages;
+  }
+  const older = messages.slice(0, messages.length - CONVERSATION_KEEP_RECENT);
+  const recent = messages.slice(messages.length - CONVERSATION_KEEP_RECENT);
+
+  const olderText = older
+    .map((m) => `${m.role === "user" ? "کاربر" : "دستیار"}: ${m.content}`)
+    .join("\n")
+    .slice(0, 6000);
+
+  try {
+    const summaryMessages = [
+      {
+        role: "system",
+        content:
+          "متن مکالمه‌ی زیر رو در حداکثر ۴-۵ جمله‌ی فارسی خلاصه کن. فقط نکات مهم، خواسته‌ها و تصمیمات کاربر رو نگه دار، جزئیات کم‌اهمیت رو حذف کن.",
+      },
+      { role: "user", content: olderText },
+    ];
+    const result = await env.AI.run(LIGHT_MODELS[0], {
+      messages: summaryMessages,
+      max_tokens: 300,
+    });
+    const summary = result && result.response ? result.response.trim() : "";
+    if (!summary) return messages;
+    return [
+      { role: "system", content: `خلاصه‌ی بخش قبلی مکالمه: ${summary}` },
+      ...recent,
+    ];
+  } catch (e) {
+    // اگه خلاصه‌سازی شکست خورد، همون مکالمه‌ی کامل رو بفرست (fail-safe)
+    return messages;
+  }
+}
+
+
 function buildSuggestedActions(responseText, isVision) {
   if (isVision) {
     return ["یه اسکرین‌شات دیگه بفرستم؟", "راه‌حل جایگزین هم هست؟", "هزینه‌ی رفعش چقدره؟"];
@@ -381,13 +454,15 @@ export default {
       }
 
       const siteContext = await getSiteContext(ctx);
+      const languageInstruction = detectLanguageInstruction(lastUserText);
 
       const fullSystem = `${system || ""}
 
 ===== اطلاعات زنده سایت بایت‌لب (چند صفحه، تازه‌خوانی‌شده) =====
 ${siteContext}
 ===== پایان اطلاعات سایت =====
-اگه مناسب بود، از فرمت لیستی/مارک‌داون ساده برای خوانایی بهتر استفاده کن.`;
+اگه مناسب بود، از فرمت لیستی/مارک‌داون ساده برای خوانایی بهتر استفاده کن.
+${languageInstruction}`;
 
       // ---- حالت تصویر: تک عکس یا چند عکس ----
       const imageList = images && Array.isArray(images) ? images : image ? [image] : [];
@@ -420,7 +495,8 @@ ${siteContext}
 
         const visionPrompt = buildVisionPrompt(
           lastUserText || "این تصویر رو بررسی کن.",
-          conversationHint
+          conversationHint,
+          languageInstruction
         );
 
         try {
@@ -456,9 +532,11 @@ ${siteContext}
       }
 
       // ---- حالت معمولی: متن ----
+      const condensedMessages = await condenseConversation(env, effectiveMessages);
       const aiMessages = [
         { role: "system", content: fullSystem },
-        ...effectiveMessages.map((m) => ({ role: m.role, content: m.content })),
+        ...FEW_SHOT_EXAMPLES,
+        ...condensedMessages.map((m) => ({ role: m.role, content: m.content })),
       ];
 
       const preferHeavy = needsHeavyModel(lastUserText);
