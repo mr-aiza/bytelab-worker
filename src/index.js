@@ -429,10 +429,11 @@ export default {
 
       // ---- اگه صدا فرستاده شده، اول تبدیلش کن به متن ----
       let effectiveMessages = messages || [];
+      let transcribedText = null;
       if (audio) {
         try {
-          const transcribed = await transcribeAudio(env, audio);
-          effectiveMessages = [...effectiveMessages, { role: "user", content: transcribed }];
+          transcribedText = await transcribeAudio(env, audio);
+          effectiveMessages = [...effectiveMessages, { role: "user", content: transcribedText }];
         } catch (audioErr) {
           return jsonResponse(
             { error: "خطا در تبدیل صدا به متن: " + (audioErr.message || String(audioErr)) },
@@ -553,6 +554,7 @@ ${languageInstruction}`;
           {
             content: [{ type: "text", text: response || "پاسخی دریافت نشد." }],
             suggested_actions: buildSuggestedActions(response, false),
+            transcribed_text: transcribedText,
             _debug_model: modelUsed,
           },
           200,
