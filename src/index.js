@@ -20,14 +20,14 @@ const PER_PAGE_CHAR_LIMIT = 850;
 const SITE_CONTEXT_CACHE_SECONDS = 600; // ۱۰ دقیقه کش
 
 // مدل سبک (سریع) و مدل سنگین (باهوش‌تر ولی کندتر)
-const LIGHT_MODELS = ["@cf/meta/llama-3.1-8b-instruct-fast", "@cf/meta/llama-3.1-8b-instruct"];
+const LIGHT_MODELS = ["@cf/meta/llama-3.1-8b-instruct-fast"];
 const HEAVY_MODELS = ["@cf/meta/llama-3.3-70b-instruct-fp8-fast"];
 
 const VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 const WHISPER_MODEL = "@cf/openai/whisper";
 
 const DEFAULT_MAX_TOKENS = 900;
-const HARD_MAX_TOKENS = 1400;
+const HARD_MAX_TOKENS = 4096;
 
 const MAX_USER_MESSAGE_LENGTH = 2000; // کاراکتر
 const MAX_IMAGE_BASE64_LENGTH = 7_000_000; // تقریباً ۵ مگابایت فایل واقعی
@@ -425,7 +425,7 @@ export default {
 
     try {
       const body = await request.json();
-      const { system, messages, image, images, audio, max_tokens } = body;
+      const { system, messages, image, images, audio, max_tokens, prefer_heavy } = body;
 
       // ---- اگه صدا فرستاده شده، اول تبدیلش کن به متن ----
       let effectiveMessages = messages || [];
@@ -540,7 +540,7 @@ ${languageInstruction}`;
         ...condensedMessages.map((m) => ({ role: m.role, content: m.content })),
       ];
 
-      const preferHeavy = needsHeavyModel(lastUserText);
+      const preferHeavy = prefer_heavy === true || needsHeavyModel(lastUserText);
 
       try {
         const { response, modelUsed } = await runTextWithFallback(
